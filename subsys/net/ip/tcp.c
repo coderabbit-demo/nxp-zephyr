@@ -2329,6 +2329,11 @@ static enum net_verdict tcp_recv(struct net_conn *net_conn,
 	if (th_flags(th) & SYN && !(th_flags(th) & ACK)) {
 		struct tcp *conn_old = ((struct net_context *)user_data)->tcp;
 
+		/* Match TCP_LISTEN's flag check before allocating a child. */
+		if ((th_flags(th) & ~(ECN | CWR)) != SYN) {
+			goto out;
+		}
+
 		if (conn_old == NULL || tcp_backlog_is_full(conn_old)) {
 			/* If the connection backlog is full, ignore the SYN
 			 * packet (same behavior as on Linux). Retransmitted SYN
@@ -2343,6 +2348,10 @@ static enum net_verdict tcp_recv(struct net_conn *net_conn,
 			goto in;
 		}
 
+		/* Reserve the slot before processing options or entering TCP_LISTEN,
+		 * so that every child release restores a slot already consumed.
+		 */
+		tcp_backlog_dec(conn_old);
 		conn->accepted_conn = conn_old;
 	}
 in:
@@ -3091,14 +3100,6 @@ static enum net_verdict tcp_in(struct tcp *conn, struct net_pkt *pkt)
 	switch (conn->state) {
 	case TCP_LISTEN:
 		if (FL(&fl, ==, SYN)) {
-			/* Decrement the connection backlog as soon as SYN arrives,
-			 * otherwise it'd be possible to overflow the backlog
-			 * while waiting for final handshake ACK
-			 */
-			if (conn->accepted_conn != NULL) {
-				tcp_backlog_dec(conn->accepted_conn);
-			}
-
 			/* Make sure our MSS is also sent in the ACK */
 			conn->send_options.mss_found = true;
 			conn->isn_peer = th_seq(th);

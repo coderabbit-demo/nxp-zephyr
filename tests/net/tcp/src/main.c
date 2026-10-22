@@ -116,6 +116,7 @@ static enum test_case_no {
 	TEST_CLIENT_SEQ_VALIDATION = 19,
 	TEST_SERVER_ACK_VALIDATION = 20,
 	TEST_SERVER_FIN_ACK_AFTER_DATA = 21,
+	TEST_SERVER_INITIAL_SYN,
 } test_case_no;
 
 static enum test_state t_state;
@@ -439,6 +440,13 @@ static int tester_send(const struct device *dev, struct net_pkt *pkt)
 	}
 
 	switch (test_case_no) {
+	case TEST_SERVER_INITIAL_SYN:
+		if (th.th_flags == (SYN | ACK)) {
+			test_sem_give();
+		} else {
+			test_verify_flags(&th, RST | ACK);
+		}
+		break;
 	case TEST_CLIENT_IPV4:
 	case TEST_CLIENT_IPV6:
 		handle_client_test(net_pkt_family(pkt), &th);
@@ -2329,6 +2337,114 @@ ZTEST(net_tcp, test_server_rst_on_listening_port_no_active_connection)
 	test_sem_take(K_MSEC(100), __LINE__);
 
 	net_context_put(ctx);
+}
+
+static void receive_initial_packet(struct net_pkt *pkt)
+{
+	zassert_not_null(pkt, "Failed to allocate packet");
+
+	/* Keep a reference so we can wait until the RX thread is done. */
+	net_pkt_ref(pkt);
+	zassert_ok(net_recv_data(net_iface, pkt), "Failed to inject packet");
+	zassert_true(WAIT_FOR(atomic_get(&pkt->atomic_ref) == 1, 1000, k_msleep(1)),
+		     "Packet was not processed");
+	net_pkt_unref(pkt);
+}
+
+static void assert_no_listener_children(struct tcp *conn, void *user_data)
+{
+	struct tcp *listener = user_data;
+
+	if (conn->accepted_conn == listener) {
+		zassert_unreachable("Rejected SYN allocated a child");
+	}
+}
+
+static void test_server_initial_syn(net_sa_family_t af)
+{
+	NET_PKT_DATA_ACCESS_DEFINE(tcp_access, struct tcphdr);
+	static const uint8_t invalid_flags[] = {
+		SYN | FIN, SYN | PSH, SYN | URG, SYN | RST,
+		SYN | FIN | ECN | CWR,
+	};
+	static const uint8_t invalid_options[] = { 2, 3, 0, 0 };
+	struct net_context *ctx;
+	struct net_pkt *pkt;
+	struct tcphdr *th;
+	struct tcp *listener;
+	struct net_sockaddr *addr = af == NET_AF_INET ?
+		(struct net_sockaddr *)&my_addr_s : (struct net_sockaddr *)&my_addr_v6_s;
+	net_socklen_t addrlen = af == NET_AF_INET ? sizeof(my_addr_s) : sizeof(my_addr_v6_s);
+
+	test_case_no = TEST_SERVER_INITIAL_SYN;
+	seq = ack = 0;
+	zassert_ok(net_context_get(af, NET_SOCK_STREAM, NET_IPPROTO_TCP, &ctx));
+	net_context_ref(ctx);
+	zassert_ok(net_context_bind(ctx, addr, addrlen));
+	zassert_ok(net_context_listen(ctx, 1));
+	zassert_ok(net_context_accept(ctx, dummy_accept_cb, K_NO_WAIT, NULL));
+	listener = ctx->tcp;
+
+	for (size_t i = 0; i < ARRAY_SIZE(invalid_flags); i++) {
+		pkt = tester_prepare_tcp_pkt(af, net_htons(PEER_PORT + i),
+					     net_htons(MY_PORT), invalid_flags[i], NULL, 0);
+		receive_initial_packet(pkt);
+		net_tcp_foreach(assert_no_listener_children, listener);
+		zassert_equal(atomic_get(&listener->backlog), 1);
+	}
+
+	/* A rejected option list must restore exactly the slot it reserved. */
+	pkt = tester_prepare_tcp_pkt(af, net_htons(PEER_PORT), net_htons(MY_PORT),
+				     SYN, invalid_options, sizeof(invalid_options));
+	zassert_not_null(pkt);
+	net_pkt_cursor_init(pkt);
+	net_pkt_set_overwrite(pkt, true);
+	zassert_ok(net_pkt_skip(pkt, net_pkt_ip_hdr_len(pkt)));
+	th = net_pkt_get_data(pkt, &tcp_access);
+	zassert_not_null(th);
+	th->th_off = 6;
+	zassert_ok(net_pkt_set_data(pkt, &tcp_access));
+	net_pkt_cursor_init(pkt);
+	receive_initial_packet(pkt);
+	/* Child release runs asynchronously on the TCP workqueue. */
+	zassert_true(WAIT_FOR(atomic_get(&listener->backlog) != 0, 1000, k_msleep(1)));
+	zassert_equal(atomic_get(&listener->backlog), 1);
+	net_tcp_foreach(assert_no_listener_children, listener);
+
+	/* ECN/CWR remain ignored, as in the TCP_LISTEN state machine. */
+	for (size_t i = 0; i < 4; i++) {
+		uint8_t flags = SYN | ((i & 1) ? ECN : 0) | ((i & 2) ? CWR : 0);
+
+		k_sem_reset(&test_sem);
+		pkt = tester_prepare_tcp_pkt(af, net_htons(PEER_PORT), net_htons(MY_PORT),
+					     flags, NULL, 0);
+		receive_initial_packet(pkt);
+		test_sem_take(K_MSEC(100), __LINE__);
+		zassert_equal(atomic_get(&listener->backlog), 0);
+		/* Another peer must wait while the one-slot backlog is full. */
+		pkt = prepare_syn_packet(af, net_htons(PEER_PORT + 1), net_htons(MY_PORT));
+		receive_initial_packet(pkt);
+		zassert_equal(k_sem_count_get(&test_sem), 0);
+		/* A SYN consumes one sequence number, making this RST acceptable. */
+		seq++;
+		pkt = prepare_rst_packet(af, net_htons(PEER_PORT), net_htons(MY_PORT));
+		receive_initial_packet(pkt);
+		zassert_true(WAIT_FOR(atomic_get(&listener->backlog) != 0, 1000,
+				     k_msleep(1)));
+		zassert_equal(atomic_get(&listener->backlog), 1);
+	}
+
+	zassert_ok(net_context_put(ctx));
+}
+
+ZTEST(net_tcp, test_server_initial_syn_ipv4)
+{
+	test_server_initial_syn(NET_AF_INET);
+}
+
+ZTEST(net_tcp, test_server_initial_syn_ipv6)
+{
+	test_server_initial_syn(NET_AF_INET6);
 }
 
 /* Test case scenario
