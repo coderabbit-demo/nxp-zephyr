@@ -19,6 +19,7 @@ menuconfig UPDATEHUB
 	select MPU_ALLOW_FLASH_WRITE
 	select PSA_CRYPTO
 	select PSA_WANT_ALG_SHA_256
+	select UPDATEHUB_DTLS
 	help
 	  UpdateHub is an enterprise-grade solution which makes simple to
 	  remotely update all your embedded devices in the field. It
@@ -71,14 +72,15 @@ config UPDATEHUB_SHELL
 	  Activate shell module that provides UpdateHub commands like
 
 config UPDATEHUB_DTLS
-	bool "Activate communication CoAPS/DTLS"
+	bool "CoAPS/DTLS transport (required)"
 	select MBEDTLS
 	select MBEDTLS_ENABLE_HEAP
 	select NET_SOCKETS_SOCKOPT_TLS
 	select NET_SOCKETS_ENABLE_DTLS
 	help
-	  Enables DTLS communication between the UpdateHub
-	  client and the server
+	  UpdateHub requires DTLS with peer and hostname verification.
+	  Applications must provision a trusted server CA certificate using
+	  TLS_CREDENTIAL_CA_CERTIFICATE at security tag 1 before using UpdateHub.
 
 config UPDATEHUB_COAP_CONN_TIMEOUT
 	int "CoAP connection timeout in seconds"
