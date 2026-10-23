@@ -55,6 +55,14 @@ be manually triggered or monitored via polling. When a new update is detected,
 the binary is downloaded and installed. MCUboot can be used to verify the
 signature before upgrading the firmware.
 
+UpdateHub requires CoAPS/DTLS on port 5684 with certificate and server hostname
+verification. Before using the UpdateHub API, applications must register a trusted
+server CA certificate with :c:func:`tls_credential_add`, using
+``TLS_CREDENTIAL_CA_CERTIFICATE`` and security tag ``1``. The server certificate
+must match the configured UpdateHub server name. Connections without valid trust
+credentials fail; plaintext CoAP servers are no longer supported. MCUboot signature
+verification should also remain enabled.
+
 There is an :zephyr:code-sample:`updatehub-fota` sample included in the Zephyr
 :zephyr:code-sample-category:`mgmt` section.
 

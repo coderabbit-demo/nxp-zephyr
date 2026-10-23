@@ -82,6 +82,22 @@ documentation page.  Flash the resulting image file using west on
 Step 2: Start the UpdateHub Server
 ==================================
 
+.. important::
+
+   UpdateHub requires authenticated CoAPS/DTLS on UDP port 5684. Plaintext
+   CoAP servers, including the Community Edition setup below, cannot be used
+   for firmware updates without a DTLS endpoint. DTLS is enabled automatically;
+   ``overlay-dtls.conf`` provides additional TLS memory and cipher settings.
+
+   Before starting UpdateHub, provision the CA certificate that authenticates
+   your server using :c:func:`tls_credential_add` with
+   ``TLS_CREDENTIAL_CA_CERTIFICATE`` at security tag ``1``. The existing sample
+   certificate and private key are client credentials and do not provision
+   server trust. Replace these example credentials for your deployment and
+   register the trusted CA in ``main()`` before starting the client. The server
+   certificate must match the configured server name. Missing trust credentials,
+   invalid certificates, and hostname mismatches cause the connection to fail.
+
 Step 2.1: UpdateHub-CE (Community Edition)
 ------------------------------------------
 
@@ -103,11 +119,9 @@ Step 2.2: UpdateHub Cloud
 The UpdateHub Cloud is an enterprise-grade solution.  It provides almost same
 resources than UpdateHub-CE with the DTLS as main diferential.  For more
 details on how to use the UpdateHub Cloud please refer to the documentation on
-`updatehub.io`_.  The UpdateHub Cloud has the option to use CoAPS/DTLS or not.
-If you want to use the CoAPS/DTLS, simply add the ``overlay-dtls.conf`` when
-building the sample.  You can use the provided certificate for test this
-example or create your own.  The below procedure instruct how create a new
-certificate using openssl on a Linux machine on terminal ``terminal 2``.
+`updatehub.io`_. Use its CoAPS/DTLS endpoint with the server's trusted CA
+provisioned as described above. The commands below describe conversion of
+client credentials; they do not establish server trust.
 
 .. code-block:: console
 

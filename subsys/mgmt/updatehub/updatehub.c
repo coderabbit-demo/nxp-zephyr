@@ -25,10 +25,8 @@ LOG_MODULE_REGISTER(updatehub, CONFIG_UPDATEHUB_LOG_LEVEL);
 #include "updatehub_integrity.h"
 #include "updatehub_storage.h"
 
-#if defined(CONFIG_UPDATEHUB_DTLS)
 #define CA_CERTIFICATE_TAG 1
 #include <zephyr/net/tls_credentials.h>
-#endif
 
 #define NETWORK_TIMEOUT (2 * MSEC_PER_SEC)
 #define UPDATEHUB_POLL_INTERVAL K_MINUTES(CONFIG_UPDATEHUB_POLL_INTERVAL)
@@ -171,29 +169,20 @@ static bool start_coap_client(void)
 	struct zsock_addrinfo hints;
 	int resolve_attempts = 10;
 	int ret = -1;
+	int verify = ZSOCK_TLS_PEER_VERIFY_REQUIRED;
+	sec_tag_t sec_list[] = { CA_CERTIFICATE_TAG };
 
 	memset(&hints, 0, sizeof(hints));
 
 	if (IS_ENABLED(CONFIG_NET_IPV6)) {
 		hints.ai_family = NET_AF_INET6;
-		hints.ai_socktype = NET_SOCK_STREAM;
 	} else if (IS_ENABLED(CONFIG_NET_IPV4)) {
 		hints.ai_family = NET_AF_INET;
-		hints.ai_socktype = NET_SOCK_STREAM;
 	}
-
-#if defined(CONFIG_UPDATEHUB_DTLS)
-	int verify = ZSOCK_TLS_PEER_VERIFY_REQUIRED;
-	sec_tag_t sec_list[] = { CA_CERTIFICATE_TAG };
-	int protocol = NET_IPPROTO_DTLS_1_2;
-	char port[] = "5684";
-#else
-	int protocol = NET_IPPROTO_UDP;
-	char port[] = "5683";
-#endif
+	hints.ai_socktype = NET_SOCK_DGRAM;
 
 	while (resolve_attempts--) {
-		ret = zsock_getaddrinfo(UPDATEHUB_SERVER, port, &hints, &addr);
+		ret = zsock_getaddrinfo(UPDATEHUB_SERVER, "5684", &hints, &addr);
 		if (ret == 0) {
 			break;
 		}
@@ -206,7 +195,7 @@ static bool start_coap_client(void)
 
 	ret = 1;
 
-	ctx.sock = zsock_socket(addr->ai_family, NET_SOCK_DGRAM, protocol);
+	ctx.sock = zsock_socket(addr->ai_family, NET_SOCK_DGRAM, NET_IPPROTO_DTLS_1_2);
 	if (ctx.sock < 0) {
 		LOG_ERR("Failed to create UDP socket");
 		goto error;
@@ -214,7 +203,6 @@ static bool start_coap_client(void)
 
 	ret = -1;
 
-#if defined(CONFIG_UPDATEHUB_DTLS)
 	if (zsock_setsockopt(ctx.sock, ZSOCK_SOL_TLS, ZSOCK_TLS_SEC_TAG_LIST,
 			     sec_list, sizeof(sec_list)) < 0) {
 		LOG_ERR("Failed to set TLS_TAG option");
@@ -226,7 +214,12 @@ static bool start_coap_client(void)
 		LOG_ERR("Failed to set TLS_PEER_VERIFY option");
 		goto error;
 	}
-#endif
+
+	if (zsock_setsockopt(ctx.sock, ZSOCK_SOL_TLS, ZSOCK_TLS_HOSTNAME,
+			     UPDATEHUB_SERVER, sizeof(UPDATEHUB_SERVER) - 1) < 0) {
+		LOG_ERR("Failed to set TLS_HOSTNAME option");
+		goto error;
+	}
 
 	if (zsock_connect(ctx.sock, addr->ai_addr, addr->ai_addrlen) < 0) {
 		LOG_ERR("Cannot connect to UDP remote");
@@ -239,7 +232,7 @@ static bool start_coap_client(void)
 error:
 	zsock_freeaddrinfo(addr);
 
-	if (ret > 0) {
+	if (ret != 0 && ctx.sock >= 0) {
 		cleanup_connection();
 	}
 
